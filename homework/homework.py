@@ -96,3 +96,117 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import gzip
+import pandas as pd
+import numpy as np
+import pickle
+import json
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix
+)
+
+def cargar_datos(ruta: str) -> pd.DataFrame:
+    return pd.read_csv(ruta, index_col=False, compression='zip')
+
+def limpiar_datos(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns={'default payment next month': 'default'})
+    df = df.drop(columns=['ID'])
+    df = df[df['MARRIAGE'] != 0]
+    df = df[df['EDUCATION'] != 0]
+    df['EDUCATION'] = df['EDUCATION'].apply(lambda x: x if x < 4 else 4)
+    return df
+
+def construir_pipeline() -> Pipeline:
+    categorias = ["SEX", "EDUCATION", "MARRIAGE"]
+    transformador = ColumnTransformer([
+        ('one_hot', OneHotEncoder(dtype="int"), categorias),
+    ], remainder=StandardScaler())
+    
+    return Pipeline([
+        ('preprocesamiento', transformador),
+        ('reduccion_dimensionalidad', PCA(n_components=0.95)),
+        ('seleccion_atributos', SelectKBest(score_func=f_regression)),
+        ('modelo', MLPClassifier(max_iter=30000))
+    ])
+
+def optimizar_modelo(pipeline: Pipeline, x: pd.DataFrame) -> GridSearchCV:
+    parametros = {
+        "seleccion_atributos__k": range(1, len(x.columns) + 1),
+        "modelo__hidden_layer_sizes": [(n,) for n in range(1, 11)],
+        "modelo__solver": ["adam"],
+        "modelo__learning_rate_init": [0.01, 0.001, 0.0001],
+    }
+    return GridSearchCV(pipeline, param_grid=parametros, cv=10, scoring='balanced_accuracy', refit=True, verbose=2)
+
+def guardar_modelo(ruta: str, modelo: GridSearchCV):
+    with gzip.open(ruta, 'wb') as archivo:
+        pickle.dump(modelo, archivo)
+
+def calcular_metricas(nombre: str, y_real, y_predicho) -> dict:
+    return {
+        'tipo': 'metricas',
+        'conjunto': nombre,
+        'precision': precision_score(y_real, y_predicho),
+        'precision_balanceada': balanced_accuracy_score(y_real, y_predicho),
+        'recall': recall_score(y_real, y_predicho),
+        'f1_score': f1_score(y_real, y_predicho)
+    }
+
+def calcular_matriz_confusion(nombre: str, y_real, y_predicho) -> dict:
+    cm = confusion_matrix(y_real, y_predicho)
+    return {
+        'tipo': 'matriz_confusion',
+        'conjunto': nombre,
+        'true_0': {"predicho_0": int(cm[0][0]), "predicho_1": int(cm[0][1])},
+        'true_1': {"predicho_0": int(cm[1][0]), "predicho_1": int(cm[1][1])}
+    }
+
+def main():
+    ruta_datos = 'files/input/'
+    ruta_modelos = 'files/models/'
+    
+    test_df = cargar_datos(os.path.join(ruta_datos, 'test_data.csv.zip'))
+    train_df = cargar_datos(os.path.join(ruta_datos, 'train_data.csv.zip'))
+    
+    test_df = limpiar_datos(test_df)
+    train_df = limpiar_datos(train_df)
+    
+    x_test, y_test = test_df.drop(columns=['default']), test_df['default']
+    x_train, y_train = train_df.drop(columns=['default']), train_df['default']
+    
+    pipeline = construir_pipeline()
+    modelo = optimizar_modelo(pipeline, x_train)
+    modelo.fit(x_train, y_train)
+    
+    guardar_modelo(os.path.join(ruta_modelos, 'modelo.pkl.gz'), modelo)
+    
+    y_test_pred = modelo.predict(x_test)
+    y_train_pred = modelo.predict(x_train)
+    
+    metricas_test = calcular_metricas('test', y_test, y_test_pred)
+    metricas_train = calcular_metricas('train', y_train, y_train_pred)
+    
+    matriz_conf_test = calcular_matriz_confusion('test', y_test, y_test_pred)
+    matriz_conf_train = calcular_matriz_confusion('train', y_train, y_train_pred)
+    
+    with open('files/output/metricas.json', 'w') as archivo:
+        archivo.write(json.dumps(metricas_train) + '\n')
+        archivo.write(json.dumps(metricas_test) + '\n')
+        archivo.write(json.dumps(matriz_conf_train) + '\n')
+        archivo.write(json.dumps(matriz_conf_test) + '\n')
+
+if __name__ == "__main__":
+    main()
